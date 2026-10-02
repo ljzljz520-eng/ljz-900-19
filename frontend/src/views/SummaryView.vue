@@ -1,9 +1,100 @@
 <template>
   <div class="summary-page">
     <header class="page-header">
-      <h1 class="page-title">汇总看板</h1>
-      <p class="page-desc">问题图与整改图成对展示，按 #key 从小到大排序，同一徽章（检查项+分值）共用</p>
+      <div class="page-header-main">
+        <h1 class="page-title">汇总看板</h1>
+        <p class="page-desc">问题图与整改图成对展示，按 #key 从小到大排序，同一徽章（检查项+分值）共用</p>
+      </div>
+      <div class="page-filter">
+        <el-date-picker
+          v-model="filterDate"
+          type="date"
+          placeholder="筛选检查日期"
+          value-format="YYYY-MM-DD"
+          clearable
+          class="date-picker"
+        />
+      </div>
     </header>
+
+    <!-- 整改完成率总览：全部由接口实时数据计算 -->
+    <section v-loading="loading" class="overview-section">
+      <div class="overview-rate-card">
+        <span class="overview-label">整改完成率</span>
+        <span class="overview-rate" :class="overall.rate >= 100 ? 'success' : 'primary'">
+          {{ overall.rate }}%
+        </span>
+        <span class="overview-rate-detail">{{ overall.completed }}/{{ overall.total }}</span>
+        <el-progress
+          :percentage="overall.rate"
+          :stroke-width="10"
+          :color="overall.rate >= 100 ? '#10b981' : '#0ea5e9'"
+          class="overview-progress"
+        />
+      </div>
+      <div class="overview-cards">
+        <div class="overview-card">
+          <span class="overview-card-value">{{ overall.total }}</span>
+          <span class="overview-card-label">问题总数</span>
+        </div>
+        <div class="overview-card">
+          <span class="overview-card-value success">{{ overall.completed }}</span>
+          <span class="overview-card-label">已整改</span>
+        </div>
+        <div class="overview-card">
+          <span class="overview-card-value warning">{{ overall.pending }}</span>
+          <span class="overview-card-label">未整改</span>
+        </div>
+        <div class="overview-card">
+          <span class="overview-card-value danger">-{{ overall.totalScore }}</span>
+          <span class="overview-card-label">总扣分</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- 按员工统计：点击行跳转到对应图片对 -->
+    <section v-if="summary.length > 0" class="emp-stats-section">
+      <h2 class="section-title">按员工统计</h2>
+      <div class="emp-stats-table-wrap">
+        <table class="emp-stats-table">
+          <thead>
+            <tr>
+              <th>员工</th>
+              <th>问题总数</th>
+              <th>已整改</th>
+              <th>未整改</th>
+              <th>总扣分</th>
+              <th>完成率</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="item in summary"
+              :key="item.user?.id"
+              class="emp-row"
+              @click="scrollToEmployee(item.user?.id)"
+            >
+              <td>
+                <div class="emp-cell-user">
+                  <span class="emp-avatar">{{ (item.user?.name || '员')[0] }}</span>
+                  <span class="emp-name">{{ item.user?.name }}</span>
+                </div>
+              </td>
+              <td>{{ item.total }}</td>
+              <td class="cell-success">{{ item.completed }}</td>
+              <td class="cell-warning">{{ item.pending }}</td>
+              <td class="cell-danger">-{{ item.total_score }}</td>
+              <td>
+                <span class="emp-progress" :class="item.progress >= 100 ? 'success' : 'primary'">
+                  {{ item.progress }}%
+                </span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="emp-stats-hint">点击员工可跳转到对应图片对</p>
+    </section>
 
     <section v-loading="loading" class="summary-section">
       <div v-if="summary.length === 0 && !loading" class="empty-state">
@@ -14,7 +105,13 @@
         <p class="empty-hint">请在检查上传中创建记录</p>
       </div>
 
-      <div v-for="item in summary" :key="item.user?.id" class="summary-card">
+      <div
+        v-for="item in summary"
+        :key="item.user?.id"
+        :ref="(el) => setCardRef(item.user?.id, el)"
+        class="summary-card"
+        :class="{ 'card-highlight': highlightId === item.user?.id }"
+      >
         <div class="summary-header">
           <div class="summary-user">
             <div class="user-avatar">{{ (item.user?.name || '员')[0] }}</div>
@@ -27,6 +124,10 @@
                 {{ item.progress }}%
               </span>
               <span class="stat-detail">（{{ item.completed }}/{{ item.total }}）</span>
+            </div>
+            <div class="stat">
+              <span class="stat-label">未整改</span>
+              <span class="stat-value warning">{{ item.pending }}</span>
             </div>
             <div class="stat">
               <span class="stat-label">扣分合计</span>
@@ -80,12 +181,56 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { CircleCheck, DataAnalysis } from '@element-plus/icons-vue'
 import { api, apiBase } from '@/api/request'
 
 const loading = ref(true)
 const summary = ref([])
+const filterDate = ref('')
+const highlightId = ref(null)
+const cardRefs = new Map()
+let highlightTimer = null
+
+// 总览统计：完全基于接口返回的实时数据计算，不写死
+const overall = computed(() => {
+  let total = 0
+  let completed = 0
+  let totalScore = 0
+  for (const item of summary.value) {
+    total += item.total || 0
+    completed += item.completed || 0
+    totalScore += item.total_score || 0
+  }
+  return {
+    total,
+    completed,
+    pending: total - completed,
+    totalScore,
+    rate: total > 0 ? Math.round((completed / total) * 1000) / 10 : 0,
+  }
+})
+
+function setCardRef(userId, el) {
+  if (userId == null) return
+  if (el) {
+    cardRefs.set(userId, el)
+  } else {
+    cardRefs.delete(userId)
+  }
+}
+
+function scrollToEmployee(userId) {
+  if (userId == null) return
+  const el = cardRefs.get(userId)
+  if (!el) return
+  el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  highlightId.value = userId
+  if (highlightTimer) clearTimeout(highlightTimer)
+  highlightTimer = setTimeout(() => {
+    highlightId.value = null
+  }, 1600)
+}
 
 function imageUrl(path) {
   if (!path) return ''
@@ -96,13 +241,16 @@ function imageUrl(path) {
 async function loadSummary() {
   loading.value = true
   try {
-    summary.value = await api.getSummary()
+    summary.value = await api.getSummary({ check_date: filterDate.value || undefined })
   } catch (_) {
     summary.value = []
   } finally {
     loading.value = false
   }
 }
+
+// 筛选日期变化后重新拉取，统计与图片对同步更新
+watch(filterDate, loadSummary)
 
 onMounted(loadSummary)
 </script>
@@ -114,7 +262,242 @@ onMounted(loadSummary)
 }
 
 .page-header {
-  margin-bottom: 32px;
+  margin-bottom: 24px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.page-header-main {
+  min-width: 0;
+}
+
+.page-filter {
+  flex-shrink: 0;
+}
+
+.date-picker {
+  width: 180px;
+}
+
+/* 整改完成率总览 */
+.overview-section {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+  margin-bottom: 24px;
+}
+
+.overview-rate-card {
+  flex: 1 1 320px;
+  min-width: 280px;
+  background: white;
+  border-radius: 16px;
+  padding: 24px;
+  border: 1px solid rgba(0, 0, 0, 0.04);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.06);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.overview-label {
+  font-size: 14px;
+  color: #64748b;
+}
+
+.overview-rate {
+  font-size: 40px;
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+}
+
+.overview-rate.primary {
+  color: #0ea5e9;
+}
+
+.overview-rate.success {
+  color: #10b981;
+}
+
+.overview-rate-detail {
+  font-size: 13px;
+  color: #94a3b8;
+}
+
+.overview-progress {
+  margin-top: 4px;
+}
+
+.overview-cards {
+  flex: 2 1 480px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 16px;
+}
+
+.overview-card {
+  background: white;
+  border-radius: 16px;
+  padding: 20px;
+  border: 1px solid rgba(0, 0, 0, 0.04);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.06);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 6px;
+}
+
+.overview-card-value {
+  font-size: 28px;
+  font-weight: 700;
+  color: #1e293b;
+}
+
+.overview-card-value.success {
+  color: #10b981;
+}
+
+.overview-card-value.warning {
+  color: #f59e0b;
+}
+
+.overview-card-value.danger {
+  color: #ef4444;
+}
+
+.overview-card-label {
+  font-size: 13px;
+  color: #64748b;
+}
+
+/* 按员工统计表 */
+.emp-stats-section {
+  background: white;
+  border-radius: 16px;
+  padding: 20px 24px;
+  border: 1px solid rgba(0, 0, 0, 0.04);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.06);
+  margin-bottom: 24px;
+}
+
+.section-title {
+  font-size: 17px;
+  font-weight: 600;
+  color: #1e293b;
+  margin: 0 0 16px;
+}
+
+.emp-stats-table-wrap {
+  overflow-x: auto;
+}
+
+.emp-stats-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.emp-stats-table th {
+  text-align: left;
+  font-size: 13px;
+  font-weight: 500;
+  color: #64748b;
+  padding: 10px 12px;
+  border-bottom: 1px solid #e2e8f0;
+  white-space: nowrap;
+}
+
+.emp-stats-table td {
+  padding: 12px;
+  border-bottom: 1px solid #f1f5f9;
+  color: #334155;
+  white-space: nowrap;
+}
+
+.emp-stats-table tbody tr.emp-row {
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.emp-stats-table tbody tr.emp-row:hover {
+  background: #f0f9ff;
+}
+
+.emp-stats-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.emp-cell-user {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.emp-avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #0ea5e9, #06b6d4);
+  color: white;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.emp-name {
+  font-weight: 600;
+  color: #1e293b;
+}
+
+.cell-success {
+  color: #10b981;
+  font-weight: 600;
+}
+
+.cell-warning {
+  color: #f59e0b;
+  font-weight: 600;
+}
+
+.cell-danger {
+  color: #ef4444;
+  font-weight: 600;
+}
+
+.emp-progress {
+  font-weight: 700;
+}
+
+.emp-progress.primary {
+  color: #0ea5e9;
+}
+
+.emp-progress.success {
+  color: #10b981;
+}
+
+.emp-stats-hint {
+  font-size: 12px;
+  color: #94a3b8;
+  margin: 12px 0 0;
+}
+
+.summary-card {
+  scroll-margin-top: 88px;
+  transition: box-shadow 0.3s, border-color 0.3s;
+}
+
+.summary-card.card-highlight {
+  border-color: #0ea5e9;
+  box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.25), 0 8px 24px rgba(14, 165, 233, 0.15);
 }
 
 .page-title {
@@ -243,6 +626,10 @@ onMounted(loadSummary)
 
 .stat-value.success {
   color: #10b981;
+}
+
+.stat-value.warning {
+  color: #f59e0b;
 }
 
 .stat-value.danger {
